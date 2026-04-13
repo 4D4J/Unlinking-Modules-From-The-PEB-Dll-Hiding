@@ -1,7 +1,6 @@
 #pragma once
 
-typedef struct _PEB_LDR_DATA
-{
+typedef struct _PEB_LDR_DATA {
 	ULONG                   Length;
 	BOOLEAN                 Initialized;
 	PVOID                   SsHandle;
@@ -17,7 +16,6 @@ typedef struct _UNICODE_STRING {
 } UNICODE_STRING, * PUNICODE_STRING;
 
 typedef struct _LDR_MODULE {
-
 	LIST_ENTRY              InLoadOrderModuleList;
 	LIST_ENTRY              InMemoryOrderModuleList;
 	LIST_ENTRY              InInitializationOrderModuleList;

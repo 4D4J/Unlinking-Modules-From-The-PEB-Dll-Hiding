@@ -1,4 +1,5 @@
 #include <Windows.h>
+#include <intrin.h>
 #include <array>
 #include <iostream>
 #include <vector>
@@ -11,8 +12,7 @@ using AquireOrRelease = NTSTATUS(NTAPI*)();
 
 typedef std::pair <PLIST_ENTRY, int> Pair;
 
-struct Info
-{
+struct Info {
 	PLIST_ENTRY pListHead = nullptr, pListMod = nullptr;
 	PEB_LDR_DATA* pLdr = nullptr;
 	UNICODE_STRING* pModName = nullptr;
@@ -24,84 +24,59 @@ struct Info
 	
 } UnlinkData;
 
-uintptr_t GetPEB()
-{
-
-	uintptr_t  PebAddr;
-
-	__asm __volatile
-	{
-		push esi
-
-		xor esi, esi
-
-		mov esi, fs : [0x30]
-
-		mov PebAddr, esi
-
-		pop esi
-	}
-
+uintptr_t GetPEB() {
+#ifdef _WIN64
+	uintptr_t PebAddr = __readgsqword(0x60);
+#else
+	uintptr_t PebAddr = (uintptr_t)__readfsdword(0x30);
+#endif
 	return (PebAddr > 0) ? PebAddr : NULL;
 }
 
-enum : int
-{
+// Offsets depuis chaque noeud de liste jusqu'au champ FullDllName dans LDR_MODULE.
+// Calcules automatiquement via offsetof pour etre corrects sur x86 ET x64.
+static const int InLoadOrderModuleList           = (int)(offsetof(LDR_MODULE, FullDllName) - offsetof(LDR_MODULE, InLoadOrderModuleList));
+static const int InMemoryOrderModuleList         = (int)(offsetof(LDR_MODULE, FullDllName) - offsetof(LDR_MODULE, InMemoryOrderModuleList));
+static const int InInitializationOrderModuleList = (int)(offsetof(LDR_MODULE, FullDllName) - offsetof(LDR_MODULE, InInitializationOrderModuleList));
 
-	InLoadOrderModuleList = 36, InMemoryOrderModuleList = 28, InInitializationOrderModuleList = 20
-};
 
-
-void ClearListEntries(int EntryOffset, const char* ModName)
-{
+void ClearListEntries(int EntryOffset, const char* ModName) {
 	UnlinkData.PebLock();
 
-	while (UnlinkData.pListMod->Flink != UnlinkData.pListHead)
-	{
+	while (UnlinkData.pListMod->Flink != UnlinkData.pListHead) {
 		UnlinkData.pListMod = UnlinkData.pListMod->Flink;
-		UnlinkData.pModName = (UNICODE_STRING*)(((DWORD)(UnlinkData.pListMod)) + EntryOffset);
+		UnlinkData.pModName = (UNICODE_STRING*)(((uintptr_t)(UnlinkData.pListMod)) + EntryOffset);
 
 		WORD DllNameLength = (UnlinkData.pModName->Length) / 2; 
 
 		int n = DllNameLength + 1;
 
-			while (n--)
-			{
-				if (n != DllNameLength)
-				{
-					UnlinkData.tModName[n] = (CHAR)(*((UnlinkData.pModName->Buffer) +(n)));
-					continue;
-
-				}
-
-				UnlinkData.tModName[n] = (char)'\000';
+		while (n--) {
+			if (n != DllNameLength) {
+				UnlinkData.tModName[n] = (CHAR)(*((UnlinkData.pModName->Buffer) +(n)));
+				continue;
 
 			}
+			UnlinkData.tModName[n] = (char)'\000';
+		}
 
-			if (strstr(UnlinkData.tModName, ModName))
-			{
-				if (EntryOffset == InLoadOrderModuleList)
-				{
-					UnlinkData.pLdrMod = (PLDR_MODULE)(((DWORD)(UnlinkData.pListMod)));
+		if (strstr(UnlinkData.tModName, ModName)) {
+			if (EntryOffset == InLoadOrderModuleList) {
+				UnlinkData.pLdrMod = (PLDR_MODULE)(((uintptr_t)(UnlinkData.pListMod)));
 
-					UnlinkData.pLdrMod->HashTableEntry.Blink->Flink = UnlinkData.pLdrMod->HashTableEntry.Flink;
-					UnlinkData.pLdrMod->HashTableEntry.Flink->Blink = UnlinkData.pLdrMod->HashTableEntry.Blink;
-				}
-
-				UnlinkData.pListMod->Blink->Flink = UnlinkData.pListMod->Flink;
-				UnlinkData.pListMod->Flink->Blink = UnlinkData.pListMod->Blink;
+				UnlinkData.pLdrMod->HashTableEntry.Blink->Flink = UnlinkData.pLdrMod->HashTableEntry.Flink;
+				UnlinkData.pLdrMod->HashTableEntry.Flink->Blink = UnlinkData.pLdrMod->HashTableEntry.Blink;
 			}
-
-
+			UnlinkData.pListMod->Blink->Flink = UnlinkData.pListMod->Flink;
+			UnlinkData.pListMod->Flink->Blink = UnlinkData.pListMod->Blink;
+		}
 	}
-
 	UnlinkData.ReleasePebLock();
 }
 
 
 
-void UnlinkModule(const char* TargetModName)
-{
+void UnlinkModule(const char* TargetModName) {
 
 	UnlinkData.PebLock = (AquireOrRelease)(GetProcAddress(GetModuleHandleA("ntdll.dll"), "RtlAcquirePebLock"));
 	UnlinkData.ReleasePebLock = (AquireOrRelease)(GetProcAddress(GetModuleHandleA("ntdll.dll"), "RtlReleasePebLock"));
@@ -109,7 +84,11 @@ void UnlinkModule(const char* TargetModName)
 
 	UnlinkData.PebAddr = GetPEB();
 
-	UnlinkData.pLdr = (PEB_LDR_DATA*)(DWORD*)*(DWORD*)(UnlinkData.PebAddr + 12);
+#ifdef _WIN64
+	UnlinkData.pLdr = *(PEB_LDR_DATA**)(UnlinkData.PebAddr + 0x18);
+#else
+	UnlinkData.pLdr = *(PEB_LDR_DATA**)(UnlinkData.PebAddr + 0x0C);
+#endif
 
 	std::vector <Pair> pairs;
 
@@ -125,23 +104,19 @@ void UnlinkModule(const char* TargetModName)
 }
 
  
-DWORD WINAPI TestThread(HMODULE hModule)
-{
+DWORD WINAPI TestThread(HMODULE hModule) {
 
 	Sleep(3000);
 
-	UnlinkModule("my attemp at a bhop.dll");
+	UnlinkModule("exemple.dll");
 
 	Sleep(4525223);
 	return 0;
 }
 
-BOOL WINAPI DllMain(HMODULE hModule, DWORD dwReason, LPVOID lpReserved)
-{
-	switch (dwReason)
-	{
+BOOL WINAPI DllMain(HMODULE hModule, DWORD dwReason, LPVOID lpReserved) {
+	switch (dwReason) {
 	case DLL_PROCESS_ATTACH:
-
 		CreateThread(nullptr, NULL, (LPTHREAD_START_ROUTINE)TestThread, &hModule, NULL, nullptr);
 		DisableThreadLibraryCalls(hModule);
 		break;
